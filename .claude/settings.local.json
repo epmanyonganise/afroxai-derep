@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(New-Item -ItemType Directory -Path \"c:\\\\Users\\\\HP\\\\Desktop\\\\Projects\\\\afroxai-derep\\\\artifacts\" -Force)",
+      "Bash(Out-Null)",
+      "PowerShell(New-Item -ItemType Directory -Path \"c:\\\\Users\\\\HP\\\\Desktop\\\\Projects\\\\afroxai-derep\\\\artifacts\" -Force)",
+      "PowerShell(New-Item -ItemType File -Path \"c:\\\\Users\\\\HP\\\\Desktop\\\\Projects\\\\afroxai-derep\\\\artifacts\\\\zanthoxylum_features.parquet\" -Force)",
+      "PowerShell(New-Item -ItemType File -Path \"c:\\\\Users\\\\HP\\\\Desktop\\\\Projects\\\\afroxai-derep\\\\artifacts\\\\zanthoxylum_ecfp4.npy\" -Force)"
+    ]
+  }
+}
