@@ -170,7 +170,7 @@ SWISSTARGET_ORGANISMS = [
 ]
 
 
-def predict_targets_swisstarget(smiles, organism="Homo sapiens", timeout=30):
+def predict_targets_swisstarget(smiles, organism="Homo sapiens", timeout=40):
     """Query SwissTargetPrediction REST API and return ranked target predictions."""
     import urllib.parse
 
@@ -178,15 +178,36 @@ def predict_targets_swisstarget(smiles, organism="Homo sapiens", timeout=30):
     if smiles_std is None:
         return {"status": "INVALID_SMILES", "predictions": [], "organism": organism}
 
+    # STP URL uses underscores; their API accepts both but underscore is safer
+    organism_param = organism.replace(" ", "_")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "http://www.swisstargetprediction.ch/",
+    }
+
     try:
         url = "http://www.swisstargetprediction.ch/predict.php"
-        payload = {"smiles": smiles_std, "organism": organism}
-        r = requests.post(url, data=payload, timeout=timeout)
+        payload = {"smiles": smiles_std, "organism": organism_param}
+        r = requests.post(url, data=payload, headers=headers, timeout=timeout)
         if r.status_code != 200:
             return {"status": "API_ERROR", "predictions": [], "organism": organism,
                     "reason": f"HTTP {r.status_code}"}
 
-        data = r.json()
+        text = r.text.strip()
+        if not text:
+            return {"status": "NO_PREDICTIONS", "predictions": [], "organism": organism}
+        try:
+            data = r.json()
+        except Exception:
+            return {"status": "NO_PREDICTIONS", "predictions": [], "organism": organism,
+                    "reason": "API returned non-JSON response"}
         if not data:
             return {"status": "NO_PREDICTIONS", "predictions": [], "organism": organism}
 
@@ -293,14 +314,16 @@ def predict_targets(smiles, similarity_threshold=70, top_n=10, timeout=15):
                 target_id = act.get("target_chembl_id")
                 target_name = act.get("target_pref_name") or "(unnamed target)"
                 target_org = act.get("target_organism") or "(unknown organism)"
+                target_type = act.get("target_type") or "Other"
                 if not target_id:
                     continue
-                
+
                 if target_id not in target_aggregates:
                     target_aggregates[target_id] = {
                         "target_chembl_id": target_id,
                         "target_name": target_name,
                         "target_organism": target_org,
+                        "target_type": target_type,
                         "evidence_count": 0,
                         "max_similarity": 0.0,
                         "supporting_compounds": set(),
@@ -319,6 +342,7 @@ def predict_targets(smiles, similarity_threshold=70, top_n=10, timeout=15):
                 "target_chembl_id": tid,
                 "target_name": agg["target_name"],
                 "organism": agg["target_organism"],
+                "target_type": agg["target_type"],
                 "supporting_compounds": len(agg["supporting_compounds"]),
                 "evidence_count": agg["evidence_count"],
                 "max_similarity": round(agg["max_similarity"], 1),
@@ -351,33 +375,45 @@ def predict_targets(smiles, similarity_threshold=70, top_n=10, timeout=15):
                 "reason": str(e)}
 
 
-def dereplicate(query_smiles, top_k=10, check_pubchem=True):
+def dereplicate(query_smiles, top_k=10, check_pubchem=True, on_progress=None):
     """Full four-layer dereplication."""
+    def _p(pct, msg=""):
+        if on_progress:
+            on_progress(pct, msg)
+
+    _p(5, "Standardising SMILES…")
     smiles_std = _standardise(query_smiles)
     if smiles_std is None:
         return {"query_smiles": query_smiles, "standardised_smiles": None,
                 "verdict": "INVALID", "verdict_score": None, "top_similarity": None,
                 "top_matches": None, "best_match_explanation": None,
                 "query_features": None, "pubchem": {"status": "SKIPPED", "cid": None, "url": None, "name": None}}
-    
+
+    _p(15, "Computing molecular fingerprint…")
     query_fp, query_desc = _features(smiles_std)
     if query_fp is None:
         return {"query_smiles": query_smiles, "standardised_smiles": smiles_std,
                 "verdict": "INVALID", "verdict_score": None, "top_similarity": None,
                 "top_matches": None, "best_match_explanation": None,
                 "query_features": None, "pubchem": {"status": "SKIPPED", "cid": None, "url": None, "name": None}}
-    
+
+    _p(30, "Searching Zanthoxylum reference (Tanimoto)…")
     top_idx, top_sims = _tanimoto_search(query_fp, top_k)
+
+    _p(50, "Running XGBoost confidence model…")
     pair_features_batch = np.array([
         _build_pair_features(query_fp, query_desc, _ref_fps[idx], _ref_descs[idx], sim)
         for idx, sim in zip(top_idx, top_sims)
     ])
     confidence_scores = _model.predict_proba(pair_features_batch)[:, 1]
+
+    _p(65, "Computing SHAP feature attributions…")
     best_explanation = _explain(pair_features_batch[0])
-    
+
+    _p(72, "Assigning verdict…")
     verdict_score = float(confidence_scores.max())
     top_similarity = float(top_sims.max())
-    
+
     if top_similarity < APP_DOMAIN_THRESHOLD:
         verdict = "NOVEL" if verdict_score < 0.30 else "NOVEL_OR_OUT_OF_DOMAIN"
     elif verdict_score >= KNOWN_CONF_THRESHOLD and top_similarity >= KNOWN_SIM_THRESHOLD:
@@ -386,10 +422,11 @@ def dereplicate(query_smiles, top_k=10, check_pubchem=True):
         verdict = "POSSIBLY_NOVEL"
     else:
         verdict = "NOVEL"
-    
+
     pubchem_result = {"status": "SKIPPED", "cid": None, "url": None, "name": None}
     verdict_note = None
     if check_pubchem:
+        _p(78, "Cross-referencing PubChem…")
         pubchem_result = _query_pubchem(smiles_std)
         if pubchem_result["status"] == "FOUND":
             if verdict in ("NOVEL", "NOVEL_OR_OUT_OF_DOMAIN", "POSSIBLY_NOVEL"):
@@ -412,6 +449,7 @@ def dereplicate(query_smiles, top_k=10, check_pubchem=True):
         else:
             verdict_note = f"PubChem lookup failed ({pubchem_result.get('reason', 'unknown')})."
     
+    _p(93, "Assembling results…")
     top_matches_df = pd.DataFrame({
         "rank": range(1, len(top_idx) + 1),
         "reference_id": _ref_df.iloc[top_idx]["source_id"].values,
